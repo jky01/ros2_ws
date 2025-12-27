@@ -5,6 +5,8 @@ import smbus2
 import time
 import cv2
 import threading
+import os
+from datetime import datetime
 from cv_bridge import CvBridge
 
 class SimplePCA9685:
@@ -54,6 +56,12 @@ class DonkeyControlNode(Node):
         self.fwd_calibrated, self.rev_calibrated = False, False
 
         self.joy_sub = self.create_subscription(Joy, 'joy', self.joy_callback, 10)
+
+        # --- Recording ---
+        self.is_recording = False
+        self.recording_base_dir = os.path.expanduser("~/recordings")
+        self.current_session_dir = None
+        self.frame_count = 0
 
         # --- Optimized Camera (Threaded + Accelerated) ---
         self.image_pub = self.create_publisher(Image, 'image_raw', 2) # Low queue to reduce latency
@@ -109,6 +117,13 @@ class DonkeyControlNode(Node):
                 img_msg.header.stamp = self.get_clock().now().to_msg()
                 img_msg.header.frame_id = "camera_link"
                 self.image_pub.publish(img_msg)
+                
+                # Auto-save images if recording
+                if self.is_recording and self.current_session_dir:
+                    timestamp = datetime.now().strftime("%H%M%S_%f")[:-3]
+                    filename = os.path.join(self.current_session_dir, f"frame_{self.frame_count:05d}_{timestamp}.jpg")
+                    cv2.imwrite(filename, frame)
+                    self.frame_count += 1
             except Exception as e:
                 self.get_logger().error(f'PUB ERROR: {e}')
 
@@ -133,7 +148,21 @@ class DonkeyControlNode(Node):
             fwd_norm = (1.0 - msg.axes[self.axis_fwd_trigger]) / 2.0 if (self.axis_fwd_trigger < len(msg.axes) and self.fwd_calibrated) else 0.0
             rev_norm = (1.0 - msg.axes[self.axis_rev_trigger]) / 2.0 if (self.axis_rev_trigger < len(msg.axes) and self.rev_calibrated) else 0.0
             throttle_val = fwd_norm if fwd_norm > 0.05 else (-rev_norm if rev_norm > 0.05 else 0.0)
+            
+            # --- Smooth Acceleration ---
+            # Exponential (Quadratic) mapping: throttle = throttle * abs(throttle)
+            # This provides much finer control at low speeds while still allowing full speed.
+            throttle_val = throttle_val * abs(throttle_val)
+
             self.apply_control(throttle_val, steering_val)
+
+            # --- Recording Logic ---
+            if abs(throttle_val) > 0.01:  # Lower threshold because of quadratic scaling (0.1^2 = 0.01)
+                if not self.is_recording:
+                    self.start_recording()
+            else:
+                if self.is_recording:
+                    self.stop_recording()
         else:
             self.apply_control(0.0, 0.0)
 
@@ -143,6 +172,24 @@ class DonkeyControlNode(Node):
         self.pca.set_pwm(0, t_pwm)
         s_pwm = int(self.s_center + steering * (self.s_left - self.s_center)) if steering >= 0 else int(self.s_center + steering * (self.s_center - self.s_right))
         self.pca.set_pwm(1, s_pwm)
+
+    def start_recording(self):
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        time_str = datetime.now().strftime("%H%M%S")
+        self.current_session_dir = os.path.join(self.recording_base_dir, date_str, f"session_{time_str}")
+        
+        try:
+            os.makedirs(self.current_session_dir, exist_ok=True)
+            self.is_recording = True
+            self.frame_count = 0
+            self.get_logger().info(f"START RECORDING: {self.current_session_dir}")
+        except Exception as e:
+            self.get_logger().error(f"RECORDING ERROR: Failed to create directory: {e}")
+
+    def stop_recording(self):
+        self.get_logger().info(f"STOP RECORDING: Saved {self.frame_count} frames to {self.current_session_dir}")
+        self.is_recording = False
+        self.current_session_dir = None
 
 def main(args=None):
     rclpy.init(args=args)
