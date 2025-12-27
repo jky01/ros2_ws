@@ -5,12 +5,13 @@ After=network-online.target
 [Service]
 Type=simple
 User=aa
+Group=aa
 WorkingDirectory=/home/aa/ros2_ws
-ExecStart=/bin/bash /home/aa/ros2_ws/src/rc_car_control/scripts/ros2_start.sh
+ExecStart=/bin/bash /home/aa/ros2_ws/src/rc_car_control/ros2_start.sh
 Restart=on-failure
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
+StandardOutput=inherit
+StandardError=inherit
 
 [Install]
 WantedBy=multi-user.target
